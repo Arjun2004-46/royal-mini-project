@@ -7,3 +7,6 @@ incidents/
 *.bmp
 
 *.log
+
+.venv/
+__pycache__/
