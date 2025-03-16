@@ -13,6 +13,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 import json
 import pygame  # For audio alerts
+import uuid
 
 # Load configuration
 def load_config():
@@ -64,11 +65,17 @@ class VideoStream:
         self.last_frame = None
         self.frame_ready = Event()
 
+        # Check if camera is opened successfully
+        if not self.stream.isOpened():
+            raise ValueError("Error: Could not open camera")
+
     def start(self):
+        """Start the video stream thread"""
         Thread(target=self.update, args=(), daemon=True, name="CameraThread").start()
         return self
 
     def update(self):
+        """Update the video stream"""
         while not self.stopped.is_set():
             with self.lock:
                 ret, frame = self.stream.read()
@@ -85,7 +92,7 @@ class VideoStream:
                     self.fps_start_time = current_time
 
                 # Maintain latest frame
-                self.last_frame = frame
+                self.last_frame = frame.copy()  # Make a copy to avoid race conditions
                 self.frame_ready.set()
 
                 # Update queue with frame
@@ -98,33 +105,37 @@ class VideoStream:
                     except queue.Empty:
                         pass
 
-    def recover_camera(self):
-        """Attempt to recover camera connection"""
-        try:
-            self.stream.release()
-            time.sleep(1)
-            self.stream = cv2.VideoCapture(self.src)
-            logging.info("Camera connection recovered")
-        except Exception as e:
-            logging.error(f"Camera recovery failed: {str(e)}")
+    def read_latest(self):
+        """Read the most recent frame"""
+        if self.last_frame is not None:
+            with self.lock:
+                return self.last_frame.copy()
+        return None
 
     def read(self):
-        """Non-blocking frame read"""
-        return self.q.get() if not self.q.empty() else self.last_frame
+        """Read the next frame from the queue"""
+        try:
+            return self.q.get(timeout=1.0)
+        except queue.Empty:
+            return None
 
-    def read_latest(self):
-        """Get the most recent frame"""
-        while not self.frame_ready.is_set() and not self.stopped.is_set():
-            time.sleep(0.01)
-        return self.last_frame
-
-    def get_fps(self):
-        return self.fps
-
-    def stop(self):
-        self.stopped.set()
+    def recover_camera(self):
+        """Attempt to recover the camera connection"""
         with self.lock:
             self.stream.release()
+            time.sleep(1.0)
+            self.stream = cv2.VideoCapture(self.src)
+            if not self.stream.isOpened():
+                logging.error("Failed to recover camera connection")
+                self.stop()
+
+    def stop(self):
+        """Stop the video stream"""
+        self.stopped.set()
+        with self.lock:
+            if self.stream is not None:
+                self.stream.release()
+        logging.info("Video stream stopped")
 
 class AlertSystem:
     def __init__(self):
@@ -178,6 +189,15 @@ class IncidentRecorder:
             if os.path.exists(self.incident_log):
                 with open(self.incident_log, 'r') as f:
                     self.history = json.load(f)
+                    # Add UUIDs to existing incidents if they don't have one
+                    modified = False
+                    for incident in self.history:
+                        if 'uuid' not in incident:
+                            incident['uuid'] = str(uuid.uuid4())
+                            modified = True
+                    if modified:
+                        with open(self.incident_log, 'w') as f:
+                            json.dump(self.history, f, indent=2)
             else:
                 self.history = []
         except Exception as e:
@@ -186,16 +206,18 @@ class IncidentRecorder:
 
     def save_incident(self, frame, incident_type, confidence, metadata=None):
         timestamp = datetime.now()
-        filename = f"{incident_type}_{timestamp.strftime('%Y%m%d_%H%M%S')}.jpg"
+        incident_uuid = str(uuid.uuid4())
+        filename = f"{incident_type}_{timestamp.strftime('%Y%m%d_%H%M%S')}_{incident_uuid[:8]}.jpg"
         filepath = os.path.join(self.output_dir, filename)
         
         try:
             cv2.imwrite(filepath, frame)
             
             incident_data = {
+                "uuid": incident_uuid,
                 "type": incident_type,
                 "timestamp": timestamp.isoformat(),
-                "filename": filename,
+                "image": filename,  # Changed from filename to image for consistency
                 "confidence": confidence,
                 "metadata": metadata or {}
             }
