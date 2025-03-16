@@ -176,6 +176,460 @@ class IncidentRecorder:
             logging.error(f"Failed to save incident: {str(e)}")
             return False
 
+class FrameProcessor:
+    """Enhanced frame processing operations"""
+    
+    def __init__(self):
+        self.font = cv2.FONT_HERSHEY_SIMPLEX
+        self.line_type = cv2.LINE_AA
+        self.performance_stats = {
+            'last_fps_update': time.time(),
+            'fps_values': [],
+            'avg_fps': 0
+        }
+        # Store fire parameters as instance variables
+        self.fire_params = None
+
+    def set_fire_params(self, params):
+        """Set fire detection parameters"""
+        self.fire_params = params
+
+    def resize_frame(self, frame, scale):
+        return cv2.resize(frame, (0, 0), fx=scale, fy=scale)
+
+    def create_fire_mask(self, hsv, lower1, upper1, lower2, upper2):
+        mask1 = cv2.inRange(hsv, lower1, upper1)
+        mask2 = cv2.inRange(hsv, lower2, upper2)
+        combined = cv2.bitwise_or(mask1, mask2)
+        
+        kernel = np.ones((3,3), np.uint8)
+        combined = cv2.erode(combined, kernel, iterations=1)
+        combined = cv2.dilate(combined, kernel, iterations=2)
+        
+        return combined
+
+    def analyze_fire(self, frame, mask, params):
+        """Enhanced fire detection with more sensitive parameters"""
+        self.fire_params = params
+        
+        if params['prev_frame'] is not None:
+            frame_diff = cv2.absdiff(frame, params['prev_frame'])
+            movement = np.mean(frame_diff)
+            
+            if movement > params['movement_threshold']:
+                current_time = time.time()
+                params['last_movement_time'] = current_time
+                
+            if time.time() - params['last_movement_time'] < 0.5:  # Reduced cooldown time
+                params['confidence'] = max(0, params['confidence'] - 0.1)  # Less confidence reduction
+                
+        params['prev_frame'] = frame.copy()
+        
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        b, g, r = cv2.split(frame)
+        
+        red_intensity = np.mean(r[mask > 0]) if np.sum(mask) > 0 else 0
+        other_intensity = np.mean((b[mask > 0] + g[mask > 0]) / 2) if np.sum(mask) > 0 else 0
+        
+        params['prev_intensities'].append(red_intensity)
+        if len(params['prev_intensities']) > params['intensity_history_size']:
+            params['prev_intensities'].pop(0)
+        
+        intensity_variation = np.std(params['prev_intensities']) / (np.mean(params['prev_intensities']) + 1e-6)
+        
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        confidence = params['confidence']
+        fire_detected = False
+        detected_regions = []
+        
+        for contour in contours:
+            area = cv2.contourArea(contour)
+            if params['min_area'] < area < params['max_area']:
+                x, y, w, h = cv2.boundingRect(contour)
+                roi_hsv = hsv[y:y+h, x:x+w]
+                
+                aspect_ratio = float(w)/h
+                saturation = np.mean(roi_hsv[:,:,1])
+                intensity_ratio = red_intensity / (other_intensity + 1e-6)
+                
+                if (0.3 < aspect_ratio < 3.0 and  # More lenient aspect ratio
+                    saturation > params['min_saturation'] and
+                    intensity_ratio > params['min_intensity_ratio']):
+                    
+                    ratio_confidence = min(intensity_ratio / 1.5, 0.5)  # More lenient ratio scoring
+                    saturation_confidence = min((saturation - 100) / 100.0, 0.5)  # More lenient saturation scoring
+                    flicker_confidence = min(intensity_variation * 3, 0.3)  # Enhanced flicker importance
+                    
+                    frame_confidence = (ratio_confidence * 0.4 + 
+                                     saturation_confidence * 0.4 + 
+                                     flicker_confidence * 0.2)
+                    
+                    confidence = min(1.0, confidence + frame_confidence)
+                    
+                    if confidence >= params['confidence_threshold']:
+                        detected_regions.append({
+                            'contour': contour,
+                            'bbox': (x, y, w, h),
+                            'confidence': confidence,
+                            'intensity_ratio': intensity_ratio,
+                            'saturation': saturation
+                        })
+                        fire_detected = True
+        
+        # Draw all detected regions with detailed information
+        for region in detected_regions:
+            x, y, w, h = region['bbox']
+            
+            # Draw filled contour with semi-transparency
+            overlay = frame.copy()
+            cv2.drawContours(overlay, [region['contour']], -1, (0, 0, 255), -1)
+            cv2.addWeighted(overlay, 0.3, frame, 0.7, 0, frame)
+            
+            # Draw prominent bounding box
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 3)
+            
+            # Add detailed information with better visibility
+            info_text = [
+                f"FIRE DETECTED",
+                f"Confidence: {region['confidence']:.2f}",
+                f"Int Ratio: {region['intensity_ratio']:.2f}",
+                f"Sat: {region['saturation']:.0f}"
+            ]
+            
+            # Draw text background for better visibility
+            for i, text in enumerate(info_text):
+                text_size = cv2.getTextSize(text, self.font, 0.7, 2)[0]
+                cv2.rectangle(frame, 
+                            (x, y - 30 - (i * 25)), 
+                            (x + text_size[0], y - 10 - (i * 25)), 
+                            (0, 0, 0), 
+                            -1)
+                cv2.putText(frame, text, 
+                           (x, y - 15 - (i * 25)),
+                           self.font, 0.7, (255, 255, 255), 2, self.line_type)
+        
+        if not fire_detected:
+            confidence = max(0, confidence - 0.02)  # Slower confidence decay
+        
+        return fire_detected, confidence
+
+    def detect_pose(self, frame, pose):
+        """Enhanced pose detection with RGB conversion"""
+        # Convert the BGR image to RGB
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        # Process the frame and return results
+        return pose.process(rgb_frame)
+
+    def draw_pose_landmarks(self, frame, results, mp_draw, mp_pose, landmark_spec, connection_spec):
+        """Draw pose landmarks with custom visualization"""
+        if results.pose_landmarks:
+            # Draw the pose landmarks
+            mp_draw.draw_landmarks(
+                frame,
+                results.pose_landmarks,
+                mp_pose.POSE_CONNECTIONS,
+                landmark_spec,
+                connection_spec
+            )
+            
+            # Add visibility scores for key points
+            visible_points = 0
+            total_points = 33  # Total number of landmarks
+            
+            for idx, landmark in enumerate(results.pose_landmarks.landmark):
+                if landmark.visibility > 0.5:  # Consider point visible if visibility > 50%
+                    visible_points += 1
+            
+            visibility_percentage = (visible_points / total_points) * 100
+            
+            # Draw visibility information
+            cv2.putText(frame, f'Body Visibility: {visibility_percentage:.1f}%',
+                       (10, 30), self.font, 0.5, (0, 255, 0), 1, self.line_type)
+
+    def calculate_fall_metrics(self, landmarks, mp_pose):
+        """Enhanced fall metrics calculation with partial detection support"""
+        keypoints = {}
+        visible_keypoints = {}
+        
+        # Key points to track with their respective importance for fall detection
+        key_points = {
+            'NOSE': 0.5,
+            'LEFT_SHOULDER': 1.0,
+            'RIGHT_SHOULDER': 1.0,
+            'LEFT_HIP': 1.0,
+            'RIGHT_HIP': 1.0,
+            'LEFT_ANKLE': 0.7,
+            'RIGHT_ANKLE': 0.7
+        }
+        
+        # Get available keypoints and their visibility
+        for point, importance in key_points.items():
+            landmark = landmarks.landmark[getattr(mp_pose.PoseLandmark, point)]
+            keypoints[point] = landmark
+            visible_keypoints[point] = landmark.visibility > 0.5
+        
+        # Calculate metrics based on available points
+        metrics = {
+            'keypoints': keypoints,
+            'visible_points': visible_keypoints,
+            'body_angle': 0,
+            'current_ratio': 1.0
+        }
+        
+        # Calculate shoulder and hip positions if available
+        if visible_keypoints['LEFT_SHOULDER'] and visible_keypoints['RIGHT_SHOULDER']:
+            metrics['shoulder_y'] = (keypoints['LEFT_SHOULDER'].y + keypoints['RIGHT_SHOULDER'].y) / 2
+        elif visible_keypoints['LEFT_SHOULDER']:
+            metrics['shoulder_y'] = keypoints['LEFT_SHOULDER'].y
+        elif visible_keypoints['RIGHT_SHOULDER']:
+            metrics['shoulder_y'] = keypoints['RIGHT_SHOULDER'].y
+        
+        if visible_keypoints['LEFT_HIP'] and visible_keypoints['RIGHT_HIP']:
+            metrics['hip_y'] = (keypoints['LEFT_HIP'].y + keypoints['RIGHT_HIP'].y) / 2
+        elif visible_keypoints['LEFT_HIP']:
+            metrics['hip_y'] = keypoints['LEFT_HIP'].y
+        elif visible_keypoints['RIGHT_HIP']:
+            metrics['hip_y'] = keypoints['RIGHT_HIP'].y
+        
+        # Calculate body angle if we have both shoulder and hip positions
+        if 'shoulder_y' in metrics and 'hip_y' in metrics:
+            body_vector = np.array([metrics['hip_y'] - metrics['shoulder_y'], 1.0])
+            vertical_vector = np.array([0, 1.0])
+            metrics['body_angle'] = np.degrees(np.arccos(np.dot(body_vector, vertical_vector) / 
+                                            (np.linalg.norm(body_vector) * np.linalg.norm(vertical_vector))))
+            metrics['current_ratio'] = metrics['hip_y'] / metrics['shoulder_y']
+        
+        return metrics
+
+    def analyze_fall(self, metrics, params, frame):
+        """Enhanced fall analysis with more sensitive detection"""
+        confidence = 0.0
+        visible_points = metrics['visible_points']
+        
+        # Reduced minimum required points
+        min_required_points = 3  # Reduced from 4 to 3
+        visible_count = sum(1 for v in visible_points.values() if v)
+        
+        if visible_count < min_required_points:
+            return False, 0.0
+        
+        # More sensitive vertical orientation scoring
+        if 'body_angle' in metrics:
+            angle_score = min(1.0, metrics['body_angle'] / params['vertical_threshold'])
+            confidence += angle_score * 0.5  # Increased weight to 50%
+        
+        # More sensitive movement detection
+        if params['prev_ratio'] is not None and 'current_ratio' in metrics:
+            sudden_movement = abs(metrics['current_ratio'] - params['prev_ratio'])
+            if sudden_movement > params['movement_threshold']:
+                movement_score = min(1.0, sudden_movement / 0.3)  # More sensitive movement scoring
+                confidence += movement_score * 0.3
+        
+        params['prev_ratio'] = metrics.get('current_ratio', params['prev_ratio'])
+        
+        # More lenient body position check
+        if 'shoulder_y' in metrics and 'hip_y' in metrics:
+            height_ratio = abs(metrics['shoulder_y'] - metrics['hip_y'])
+            if height_ratio < params['height_ratio_threshold']:
+                confidence += 0.3  # Increased position weight
+        
+        # More sensitive head position check
+        if visible_points.get('NOSE', False) and 'hip_y' in metrics:
+            head_below_hips = metrics['keypoints']['NOSE'].y > metrics['hip_y']
+            if head_below_hips:
+                confidence += 0.2  # Increased head position weight
+        
+        fall_detected = False
+        if confidence > params['min_confidence']:
+            params['counter'] += 2  # Faster counter increment
+            if params['counter'] >= params['frames_threshold']:
+                self.draw_fall_alert(frame, metrics.get('body_angle', 0), confidence)
+                fall_detected = True
+                self.draw_fall_debug(frame, metrics, confidence, params)
+        else:
+            params['counter'] = max(0, params['counter'] - 1)
+        
+        return fall_detected, confidence
+
+    def draw_fall_debug(self, frame, metrics, confidence, params):
+        """Enhanced fall detection visualization with detection area marking"""
+        y_offset = frame.shape[0] - 140
+        
+        # Draw detection area
+        if metrics.get('keypoints'):
+            # Calculate bounding box around detected person
+            x_coords = []
+            y_coords = []
+            for point, landmark in metrics['keypoints'].items():
+                if metrics['visible_points'].get(point, False):
+                    x = int(landmark.x * frame.shape[1])
+                    y = int(landmark.y * frame.shape[0])
+                    x_coords.append(x)
+                    y_coords.append(y)
+            
+            if x_coords and y_coords:
+                # Add padding to bounding box
+                padding = 20
+                min_x = max(0, min(x_coords) - padding)
+                min_y = max(0, min(y_coords) - padding)
+                max_x = min(frame.shape[1], max(x_coords) + padding)
+                max_y = min(frame.shape[0], max(y_coords) + padding)
+                
+                # Draw semi-transparent overlay for fall detection area
+                overlay = frame.copy()
+                cv2.rectangle(overlay, (min_x, min_y), (max_x, max_y), (255, 0, 0), -1)
+                cv2.addWeighted(overlay, 0.2, frame, 0.8, 0, frame)
+                
+                # Draw bounding box
+                cv2.rectangle(frame, (min_x, min_y), (max_x, max_y), (255, 0, 0), 2)
+                
+                # Add fall detection information near the box
+                info_text = [
+                    f"Fall Conf: {confidence:.2f}",
+                    f"Body Angle: {metrics.get('body_angle', 0):.1f}°"
+                ]
+                
+                for i, text in enumerate(info_text):
+                    cv2.putText(frame, text, (min_x, min_y - 10 - (i * 20)),
+                              self.font, 0.5, (255, 0, 0), 2, self.line_type)
+        
+        # Show confidence breakdown
+        cv2.putText(frame, f'Fall Detection Confidence: {confidence:.2f}', 
+                   (10, y_offset), self.font, 0.6, (0, 0, 255), 2, self.line_type)
+        y_offset -= 25
+        
+        if 'body_angle' in metrics:
+            angle_text = f'Body Angle: {metrics["body_angle"]:.1f}° (Threshold: {params["vertical_threshold"]}°)'
+            cv2.putText(frame, angle_text, 
+                       (10, y_offset), self.font, 0.5, (255, 255, 255), 1, self.line_type)
+            y_offset -= 20
+        
+        if 'current_ratio' in metrics:
+            movement_text = f'Movement Score: {abs(metrics["current_ratio"] - params.get("prev_ratio", 0)):.2f}'
+            cv2.putText(frame, movement_text,
+                       (10, y_offset), self.font, 0.5, (255, 255, 255), 1, self.line_type)
+            y_offset -= 20
+        
+        stability_text = f'Detection Frames: {params["counter"]}/{params["frames_threshold"]}'
+        cv2.putText(frame, stability_text,
+                   (10, y_offset), self.font, 0.5, (255, 255, 255), 1, self.line_type)
+        
+        # Draw body keypoints with confidence colors and labels
+        if metrics.get('keypoints'):
+            for point, landmark in metrics['keypoints'].items():
+                if metrics['visible_points'].get(point, False):
+                    x = int(landmark.x * frame.shape[1])
+                    y = int(landmark.y * frame.shape[0])
+                    
+                    # Draw point with visibility-based color
+                    confidence_color = (0, int(255 * landmark.visibility), 0)
+                    cv2.circle(frame, (x, y), 4, confidence_color, -1)
+                    
+                    # Draw point label with visibility score
+                    cv2.putText(frame, f'{point}: {landmark.visibility:.2f}',
+                              (x + 5, y), self.font, 0.4, confidence_color, 1, self.line_type)
+                    
+                    # Draw connecting lines between related points
+                    if point in ['LEFT_SHOULDER', 'RIGHT_SHOULDER'] and 'NOSE' in metrics['keypoints']:
+                        nose = metrics['keypoints']['NOSE']
+                        nose_x = int(nose.x * frame.shape[1])
+                        nose_y = int(nose.y * frame.shape[0])
+                        cv2.line(frame, (x, y), (nose_x, nose_y), confidence_color, 1)
+
+    def draw_fall_alert(self, frame, angle, confidence):
+        """Enhanced fall alert visualization"""
+        # Draw attention-grabbing alert box
+        cv2.rectangle(frame, (0, 0), (frame.shape[1], frame.shape[0]), (0, 0, 255), 4)
+        
+        # Create semi-transparent overlay for alert
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (frame.shape[1], 60), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+        
+        # Draw alert text with multiple information levels
+        cv2.putText(frame, f'FALL DETECTED!', 
+                   (50, 35), self.font, 1.2, (0, 0, 255), 3, self.line_type)
+        cv2.putText(frame, f'Angle: {angle:.1f}° | Confidence: {confidence:.2f}',
+                   (50, 55), self.font, 0.7, (255, 255, 255), 2, self.line_type)
+        
+        # Add pulsing effect
+        pulse = int(time.time() * 4) % 2
+        if pulse:
+            cv2.rectangle(frame, (0, 0), (frame.shape[1], frame.shape[0]), (0, 0, 255), 6)
+
+    def draw_fire_alert(self, frame, confidence):
+        """Enhanced fire alert visualization with debug info"""
+        if self.fire_params and confidence >= self.fire_params['confidence_threshold']:
+            # Draw attention-grabbing alert box
+            cv2.rectangle(frame, (0, 0), (frame.shape[1], frame.shape[0]), (0, 0, 255), 4)
+            
+            # Create semi-transparent overlay for alert
+            overlay = frame.copy()
+            cv2.rectangle(overlay, (0, 0), (frame.shape[1], 60), (0, 0, 0), -1)
+            cv2.addWeighted(overlay, 0.5, frame, 0.5, 0, frame)
+            
+            # Draw main alert text
+            cv2.putText(frame, f'FIRE DETECTED!', 
+                       (50, 35), self.font, 1.2, (0, 0, 255), 3, self.line_type)
+            cv2.putText(frame, f'Confidence: {confidence:.2f}',
+                       (50, 55), self.font, 0.7, (255, 255, 255), 2, self.line_type)
+            
+            # Add debug information
+            y_offset = 90
+            cv2.putText(frame, f'Threshold: {self.fire_params["confidence_threshold"]:.2f}',
+                       (10, y_offset), self.font, 0.5, (255, 255, 255), 1, self.line_type)
+            
+            y_offset += 20
+            cv2.putText(frame, f'Min Saturation: {self.fire_params["min_saturation"]}',
+                       (10, y_offset), self.font, 0.5, (255, 255, 255), 1, self.line_type)
+            
+            y_offset += 20
+            cv2.putText(frame, f'Min Intensity Ratio: {self.fire_params["min_intensity_ratio"]:.2f}',
+                       (10, y_offset), self.font, 0.5, (255, 255, 255), 1, self.line_type)
+            
+            # Add pulsing effect
+            pulse = int(time.time() * 4) % 2
+            if pulse:
+                cv2.rectangle(frame, (0, 0), (frame.shape[1], frame.shape[0]), (0, 0, 255), 6)
+
+    def add_overlay(self, frame, camera_source, fps, incident_detected, stats=None):
+        # Add timestamp
+        cv2.putText(frame, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    (10, frame.shape[0] - 10), self.font, 0.5, (0, 255, 0), 1, self.line_type)
+
+        # Add enhanced status information
+        y_offset = 30
+        cv2.putText(frame, f"Camera: {camera_source} | FPS: {int(fps)}",
+                    (10, y_offset), self.font, 0.5, (255, 255, 255), 1, self.line_type)
+        
+        if stats:
+            y_offset += 20
+            if stats.get('gpu_enabled'):
+                cv2.putText(frame, "GPU Accelerated", (10, y_offset),
+                           self.font, 0.5, (255, 255, 0), 1, self.line_type)
+            
+            y_offset += 20
+            if 'fire_confidence' in stats:
+                cv2.putText(frame, f"Fire Conf: {stats['fire_confidence']:.2f}",
+                           (10, y_offset), self.font, 0.5, (255, 255, 255), 1, self.line_type)
+            
+            y_offset += 20
+            if 'fall_confidence' in stats:
+                cv2.putText(frame, f"Fall Conf: {stats['fall_confidence']:.2f}",
+                           (10, y_offset), self.font, 0.5, (255, 255, 255), 1, self.line_type)
+
+        # Add status indicator with pulse effect
+        if incident_detected:
+            pulse = int(time.time() * 4) % 2  # Create pulsing effect
+            radius = 10 + pulse * 2
+            cv2.circle(frame, (20, 20), radius, (0, 0, 255), -1)
+        else:
+            cv2.circle(frame, (20, 20), 10, (0, 255, 0), -1)
+
+    def display_frame(self, window_name, frame):
+        cv2.imshow(window_name, frame)
+
 class SmartCCTV:
     def __init__(self, camera_source="0"):
         # Initialize GPU acceleration if available
@@ -186,14 +640,28 @@ class SmartCCTV:
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
         
-        # Initialize MediaPipe with enhanced settings
+        # Initialize MediaPipe with more lenient settings for partial detection
         self.mp_pose = mp.solutions.pose
         self.pose = self.mp_pose.Pose(
-            min_detection_confidence=0.6,
-            min_tracking_confidence=0.6,
-            model_complexity=2  # Using highest accuracy model
+            min_detection_confidence=0.2,    # Lowered from 0.3
+            min_tracking_confidence=0.2,     # Lowered from 0.3
+            model_complexity=2,              # Keep highest accuracy model
+            enable_segmentation=True,        # Enable segmentation for better partial detection
+            smooth_landmarks=True            # Enable landmark smoothing
         )
         self.mp_draw = mp.solutions.drawing_utils
+        self.mp_drawing_styles = mp.solutions.drawing_styles
+        
+        # Custom drawing specs for better visibility
+        self.pose_landmark_drawing_spec = self.mp_draw.DrawingSpec(
+            color=(0, 255, 0),  # Green color
+            thickness=2,
+            circle_radius=2
+        )
+        self.pose_connection_drawing_spec = self.mp_draw.DrawingSpec(
+            color=(255, 255, 0),  # Yellow color
+            thickness=2
+        )
         
         # Initialize components
         self.camera_source = camera_source
@@ -202,33 +670,51 @@ class SmartCCTV:
         self.alert_system = AlertSystem()
         self.incident_recorder = IncidentRecorder("incidents")
         
-        # Enhanced fall detection parameters
-        self.fall_params = {
-            'threshold': 0.25,
-            'frames_threshold': 3,
-            'counter': 0,
-            'prev_ratio': None,
-            'movement_threshold': 0.3,
-            'confidence_history': [],
-            'history_size': 10
-        }
-        
-        # Enhanced fire detection parameters
-        self.fire_params = {
-            'lower1': np.array([0, 100, 100]),
-            'upper1': np.array([25, 255, 255]),
-            'lower2': np.array([160, 100, 100]),
-            'upper2': np.array([180, 255, 255]),
-            'min_area': 200,
-            'max_area': 100000,
-            'confidence': 0.0,
-            'confidence_threshold': 0.4,
-            'detection_history': [],
-            'history_size': 5
-        }
-        
         # Performance optimization
         self.frame_processor = FrameProcessor()
+        
+        # Enhanced fall detection parameters with more sensitive thresholds
+        self.fall_params = {
+            'threshold': 0.05,           # Reduced threshold for more sensitive detection
+            'frames_threshold': 2,       # Reduced frame threshold for faster detection
+            'counter': 0,
+            'prev_ratio': None,
+            'movement_threshold': 0.1,   # More sensitive movement detection
+            'confidence_history': [],
+            'history_size': 3,          # Reduced history size for faster detection
+            'min_confidence': 0.2,      # Lower minimum confidence threshold
+            'recovery_frames': 5,       # Reduced recovery frames
+            'vertical_threshold': 45,   # More sensitive angle threshold
+            'height_ratio_threshold': 0.3 # More lenient height ratio threshold
+        }
+        
+        # Enhanced fire detection parameters with more sensitive thresholds
+        self.fire_params = {
+            # More lenient hue ranges for fire detection
+            'lower1': np.array([0, 120, 120]),     # Lower saturation and value minimums
+            'upper1': np.array([25, 255, 255]),    # Wider hue range
+            'lower2': np.array([160, 120, 120]),   # Lower saturation and value minimums
+            'upper2': np.array([179, 255, 255]),   # Wider hue range
+            'min_area': 100,       # Reduced minimum area
+            'max_area': 100000,    # Increased maximum area
+            'confidence': 0.0,
+            'confidence_threshold': 0.4,  # Lower confidence threshold
+            'detection_history': [],
+            'history_size': 5,     # Shorter history for faster detection
+            'min_saturation': 120, # Lower minimum saturation
+            'min_intensity_ratio': 1.2,  # Lower intensity ratio requirement
+            'flicker_threshold': 0.1,    # Lower flicker threshold
+            'prev_intensities': [],
+            'intensity_history_size': 5,  # Shorter intensity history
+            'movement_threshold': 20.0,   # More sensitive movement threshold
+            'prev_frame': None,
+            'last_movement_time': 0
+        }
+        
+        # Pass fire parameters to frame processor
+        self.frame_processor.set_fire_params(self.fire_params)
+        
+        # Thread pool and other parameters
         self.thread_pool = ThreadPoolExecutor(max_workers=4)
         self.detection_results = {}
         self.last_incident_time = {'fall': 0, 'fire': 0}
@@ -301,10 +787,16 @@ class SmartCCTV:
             return False, 0.0
 
     def detect_fall(self, frame):
-        """Enhanced fall detection with temporal analysis"""
+        """Enhanced fall detection with partial body detection support"""
         try:
             # Process pose detection
             results = self.frame_processor.detect_pose(frame, self.pose)
+            
+            # Draw pose landmarks even if no fall is detected
+            self.frame_processor.draw_pose_landmarks(frame, results, self.mp_draw, 
+                                                   self.mp_pose, self.pose_landmark_drawing_spec,
+                                                   self.pose_connection_drawing_spec)
+            
             if not results.pose_landmarks:
                 return False, 0.0
             
@@ -338,17 +830,21 @@ class SmartCCTV:
             return False, 0.0
 
     def process_frame(self, frame):
-        """Process frame with parallel detection"""
+        """Process frame with improved detection logic"""
         try:
             display_frame = frame.copy()
             
-            # Run detections in parallel
             fire_future = self.thread_pool.submit(self.detect_fire, display_frame)
             fall_future = self.thread_pool.submit(self.detect_fall, display_frame)
             
-            # Get results
             fire_detected, fire_confidence = fire_future.result()
             fall_detected, fall_confidence = fall_future.result()
+            
+            # Modified mutual exclusion with less strict conditions
+            if fall_detected and fall_confidence > 0.8:  # Only suppress fire detection at very high fall confidence
+                fire_detected = False
+                fire_confidence = 0.0
+                self.fire_params['confidence'] = 0.0
             
             # Save incidents with metadata
             if fire_detected:
@@ -367,7 +863,6 @@ class SmartCCTV:
                     {"body_metrics": self.fall_params['confidence_history']}
                 )
             
-            # Add overlay information
             self.frame_processor.add_overlay(
                 display_frame,
                 self.camera_source,
@@ -427,179 +922,6 @@ class SmartCCTV:
         cv2.destroyAllWindows()
         pygame.quit()
         logging.info("System shutdown complete")
-
-class FrameProcessor:
-    """Enhanced frame processing operations"""
-    
-    def __init__(self):
-        self.font = cv2.FONT_HERSHEY_SIMPLEX
-        self.line_type = cv2.LINE_AA
-        self.performance_stats = {
-            'last_fps_update': time.time(),
-            'fps_values': [],
-            'avg_fps': 0
-        }
-
-    def resize_frame(self, frame, scale):
-        return cv2.resize(frame, (0, 0), fx=scale, fy=scale)
-
-    def create_fire_mask(self, hsv, lower1, upper1, lower2, upper2):
-        mask1 = cv2.inRange(hsv, lower1, upper1)
-        mask2 = cv2.inRange(hsv, lower2, upper2)
-        combined = cv2.bitwise_or(mask1, mask2)
-        
-        kernel = np.ones((3,3), np.uint8)
-        combined = cv2.erode(combined, kernel, iterations=1)
-        combined = cv2.dilate(combined, kernel, iterations=2)
-        
-        return combined
-
-    def analyze_fire(self, frame, mask, params):
-        red_channel = frame[:,:,2]
-        avg_intensity = np.mean(red_channel[mask > 0]) if np.sum(mask) > 0 else 0
-        
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        confidence = params['confidence']
-        fire_detected = False
-        
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if params['min_area'] < area < params['max_area']:
-                x, y, w, h = cv2.boundingRect(contour)
-                aspect_ratio = float(w)/h
-                
-                if 0.3 < aspect_ratio < 3.0 and avg_intensity > 120:
-                    confidence = min(1.0, confidence + 0.3)
-                    if confidence >= params['confidence_threshold']:
-                        fire_detected = True
-                        break
-        
-        if not fire_detected:
-            confidence = max(0, confidence - 0.05)
-        
-        return fire_detected, confidence
-
-    def detect_pose(self, frame, pose):
-        return pose.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-
-    def calculate_fall_metrics(self, landmarks, mp_pose):
-        # Get key points
-        keypoints = {}
-        for point in [
-            'NOSE', 'LEFT_SHOULDER', 'RIGHT_SHOULDER',
-            'LEFT_HIP', 'RIGHT_HIP', 'LEFT_ANKLE', 'RIGHT_ANKLE'
-        ]:
-            keypoints[point] = landmarks.landmark[getattr(mp_pose.PoseLandmark, point)]
-        
-        # Calculate averages
-        shoulder_y = (keypoints['LEFT_SHOULDER'].y + keypoints['RIGHT_SHOULDER'].y) / 2
-        hip_y = (keypoints['LEFT_HIP'].y + keypoints['RIGHT_HIP'].y) / 2
-        ankle_y = (keypoints['LEFT_ANKLE'].y + keypoints['RIGHT_ANKLE'].y) / 2
-        
-        # Calculate body angle
-        body_vector = np.array([hip_y - shoulder_y, 1.0])
-        vertical_vector = np.array([0, 1.0])
-        body_angle = np.degrees(np.arccos(np.dot(body_vector, vertical_vector) / 
-                                        (np.linalg.norm(body_vector) * np.linalg.norm(vertical_vector))))
-        
-        return {
-            'keypoints': keypoints,
-            'shoulder_y': shoulder_y,
-            'hip_y': hip_y,
-            'ankle_y': ankle_y,
-            'body_angle': body_angle,
-            'current_ratio': hip_y / shoulder_y
-        }
-
-    def analyze_fall(self, metrics, params, frame):
-        confidence = 0.0
-        
-        # Update sudden movement detection
-        if params['prev_ratio'] is not None:
-            sudden_movement = abs(metrics['current_ratio'] - params['prev_ratio'])
-            if sudden_movement > params['movement_threshold']:
-                params['counter'] += 1
-                confidence += 0.3
-        params['prev_ratio'] = metrics['current_ratio']
-        
-        # Check fall conditions
-        horizontal_body = abs(metrics['hip_y'] - metrics['shoulder_y']) < params['threshold']
-        head_below_hips = metrics['keypoints']['NOSE'].y > metrics['hip_y']
-        large_angle = metrics['body_angle'] > 60
-        
-        if horizontal_body:
-            confidence += 0.3
-        if head_below_hips:
-            confidence += 0.2
-        if large_angle:
-            confidence += 0.2
-        
-        fall_detected = False
-        if (horizontal_body and head_below_hips) or large_angle:
-            params['counter'] += 1
-            if params['counter'] >= params['frames_threshold']:
-                self.draw_fall_alert(frame, metrics['body_angle'], confidence)
-                fall_detected = True
-        else:
-            params['counter'] = max(0, params['counter'] - 1)
-        
-        # Draw debug info
-        self.draw_pose_debug(frame, metrics)
-        
-        return fall_detected, confidence
-
-    def draw_pose_debug(self, frame, metrics):
-        cv2.putText(frame, f'Body Angle: {metrics["body_angle"]:.1f}°', (10, 70),
-                    self.font, 0.5, (255, 255, 255), 1, self.line_type)
-        cv2.putText(frame, f'Hip/Shoulder: {metrics["current_ratio"]:.2f}', (10, 90),
-                    self.font, 0.5, (255, 255, 255), 1, self.line_type)
-
-    def draw_fire_alert(self, frame, confidence):
-        cv2.putText(frame, f'FIRE DETECTED! ({confidence:.1f})',
-                    (50, 50), self.font, 0.9, (0, 0, 255), 2, self.line_type)
-
-    def draw_fall_alert(self, frame, angle, confidence):
-        cv2.putText(frame, f'FALL DETECTED! (Angle: {angle:.1f}°, Conf: {confidence:.1f})',
-                    (50, 50), self.font, 1, (0, 0, 255), 2, self.line_type)
-        cv2.rectangle(frame, (0, 0), (frame.shape[1], frame.shape[0]), (0, 0, 255), 4)
-
-    def add_overlay(self, frame, camera_source, fps, incident_detected, stats=None):
-        # Add timestamp
-        cv2.putText(frame, datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    (10, frame.shape[0] - 10), self.font, 0.5, (0, 255, 0), 1, self.line_type)
-
-        # Add enhanced status information
-        y_offset = 30
-        cv2.putText(frame, f"Camera: {camera_source} | FPS: {int(fps)}",
-                    (10, y_offset), self.font, 0.5, (255, 255, 255), 1, self.line_type)
-        
-        if stats:
-            y_offset += 20
-            if stats.get('gpu_enabled'):
-                cv2.putText(frame, "GPU Accelerated", (10, y_offset),
-                           self.font, 0.5, (255, 255, 0), 1, self.line_type)
-            
-            y_offset += 20
-            if 'fire_confidence' in stats:
-                cv2.putText(frame, f"Fire Conf: {stats['fire_confidence']:.2f}",
-                           (10, y_offset), self.font, 0.5, (255, 255, 255), 1, self.line_type)
-            
-            y_offset += 20
-            if 'fall_confidence' in stats:
-                cv2.putText(frame, f"Fall Conf: {stats['fall_confidence']:.2f}",
-                           (10, y_offset), self.font, 0.5, (255, 255, 255), 1, self.line_type)
-
-        # Add status indicator with pulse effect
-        if incident_detected:
-            pulse = int(time.time() * 4) % 2  # Create pulsing effect
-            radius = 10 + pulse * 2
-            cv2.circle(frame, (20, 20), radius, (0, 0, 255), -1)
-        else:
-            cv2.circle(frame, (20, 20), 10, (0, 255, 0), -1)
-
-    def display_frame(self, window_name, frame):
-        cv2.imshow(window_name, frame)
 
 def main():
     parser = argparse.ArgumentParser(description='Enhanced Smart CCTV System')

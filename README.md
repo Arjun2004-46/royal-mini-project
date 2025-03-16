@@ -4,17 +4,21 @@ This project implements an AI-powered CCTV system that can detect falls and fire
 
 ## Features
 
-- Real-time fall detection using pose estimation
-- Fire detection using color thresholding
-- Incident logging with timestamps
-- Automatic saving of detected incidents
-- Live video feed with detection overlays
+- Real-time fall detection using advanced pose estimation and biomechanical analysis
+- Fire detection using multi-threshold HSV color analysis and region tracking
+- Audio alerts for detected incidents
+- Comprehensive incident logging with timestamps and confidence scores
+- Automatic saving of detected incidents with metadata
+- Live video feed with detection overlays and performance stats
+- Multi-threaded design for optimal performance
+- Automatic camera recovery in case of disconnection
 
 ## Requirements
 
 - Python 3.8 or higher
 - Webcam or USB camera
 - Required Python packages (listed in requirements.txt)
+- Audio output device for alerts
 
 ## Installation
 
@@ -28,35 +32,65 @@ This project implements an AI-powered CCTV system that can detect falls and fire
 
 1. Run the main script:
    ```bash
-   python smart_cctv.py
+   python smart_cctv.py [options]
    ```
 
+   Available options:
+   - `--camera`: Camera source (default: 0)
+   - `--resolution`: Video resolution (default: 1280x720)
+   - `--fps`: Target FPS (default: 30)
+
 2. The system will:
-   - Start your camera
+   - Start your camera with optimized settings
    - Begin monitoring for falls and fire
-   - Display the live feed with detection overlays
-   - Save incidents to the 'incidents' folder when detected
+   - Display the live feed with detection overlays and performance stats
+   - Play audio alerts when incidents are detected
+   - Save incidents to the 'incidents' folder
+   - Log all events to 'cctv.log'
 
 3. Press 'q' to quit the application
 
 ## How it Works
 
 ### Fall Detection
-- Uses MediaPipe Pose Detection to track body landmarks
-- Analyzes the relative positions of key points (hip and shoulder)
-- Triggers when unusual posture is detected
+- Uses MediaPipe Pose Detection to track 33 body landmarks
+- Analyzes multiple biomechanical metrics:
+  - Vertical displacement of key points
+  - Body angle relative to ground
+  - Movement velocity
+  - Pose stability
+- Uses confidence thresholds to minimize false positives
 
 ### Fire Detection
-- Uses color thresholding in HSV color space
-- Detects flame-like colors and patterns
-- Triggers when fire-colored regions exceed size threshold
+- Multi-stage HSV color space analysis
+- Dual-threshold fire color detection
+- Region size and shape analysis
+- Temporal consistency checking
+- Confidence scoring based on multiple parameters
+
+### Alert System
+- Real-time audio alerts using pygame
+- Different alert sounds for different incident types
+- Visual overlays with incident type and confidence
+- Timestamp and performance statistics display
 
 ## Output
-- Detected incidents are saved in the 'incidents' folder
-- Each incident is saved with timestamp and type (fall/fire)
-- Live feed shows detection boxes and warnings
+- Detected incidents are saved in the 'incidents' folder with:
+  - Timestamped image files
+  - JSON metadata including:
+    - Incident type
+    - Confidence score
+    - Detection parameters
+    - Camera settings
+- Comprehensive logging in 'cctv.log' with:
+  - System events
+  - Detection events
+  - Performance metrics
+  - Error tracking
 
 ## Notes
-- Adjust `fall_threshold` in the code to fine-tune fall detection sensitivity
-- Modify fire detection thresholds if needed for different lighting conditions
-- Ensure good lighting for optimal detection 
+- The system uses GPU acceleration when available
+- Camera settings are automatically optimized for detection
+- Multiple fail-safes for camera disconnection and recovery
+- Configurable detection parameters in the code
+- Thread-safe design for reliable operation 
