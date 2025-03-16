@@ -41,19 +41,17 @@ logging.basicConfig(
 
 class VideoStream:
     def __init__(self, src=0):
-        self.stream = cv2.VideoCapture(src)
+        # Initialize camera with AVFoundation on macOS
+        self.stream = cv2.VideoCapture(src, cv2.CAP_AVFOUNDATION)
         self.src = src
         
         # Get camera settings from config
         camera_config = CONFIG.get('CAMERA', {})
         
-        # Enhanced camera properties
-        self.stream.set(cv2.CAP_PROP_BUFFERSIZE, camera_config.get('BUFFER_SIZE', 1))
+        # Set basic camera properties first
         self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, camera_config.get('WIDTH', 1280))
         self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, camera_config.get('HEIGHT', 720))
         self.stream.set(cv2.CAP_PROP_FPS, camera_config.get('FPS', 30))
-        self.stream.set(cv2.CAP_PROP_AUTOFOCUS, int(camera_config.get('AUTO_FOCUS', True)))
-        self.stream.set(cv2.CAP_PROP_AUTO_EXPOSURE, int(camera_config.get('AUTO_EXPOSURE', True)))
         
         # Advanced threading
         self.q = queue.Queue(maxsize=4)
@@ -68,6 +66,13 @@ class VideoStream:
         # Check if camera is opened successfully
         if not self.stream.isOpened():
             raise ValueError("Error: Could not open camera")
+            
+        # Verify we can read a frame
+        ret, frame = self.stream.read()
+        if not ret or frame is None:
+            raise ValueError("Error: Could not read frame from camera")
+            
+        logging.info(f"Camera initialized successfully - Resolution: {frame.shape[1]}x{frame.shape[0]}, FPS: {self.stream.get(cv2.CAP_PROP_FPS)}")
 
     def start(self):
         """Start the video stream thread"""
@@ -118,6 +123,10 @@ class VideoStream:
             return self.q.get(timeout=1.0)
         except queue.Empty:
             return None
+
+    def get_fps(self):
+        """Get the current FPS of the video stream"""
+        return self.fps
 
     def recover_camera(self):
         """Attempt to recover the camera connection"""
