@@ -5,6 +5,8 @@ import json
 import logging
 import uuid
 import base64
+import time
+from datetime import datetime
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -15,6 +17,111 @@ CORS(app)
 
 # Server configuration
 API_PORT = 5002
+
+# Notification file path
+NOTIFICATIONS_FILE = 'incidents/notifications.json'
+
+def ensure_notifications_file():
+    """Ensure notifications file exists and is properly initialized"""
+    os.makedirs('incidents', exist_ok=True)
+    if not os.path.exists(NOTIFICATIONS_FILE):
+        with open(NOTIFICATIONS_FILE, 'w') as f:
+            json.dump([], f)
+
+def load_notifications():
+    """Load notifications from file"""
+    ensure_notifications_file()
+    try:
+        with open(NOTIFICATIONS_FILE, 'r') as f:
+            return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading notifications: {str(e)}")
+        return []
+
+def save_notifications(notifications):
+    """Save notifications to file"""
+    try:
+        with open(NOTIFICATIONS_FILE, 'w') as f:
+            json.dump(notifications, f, indent=2)
+    except Exception as e:
+        logger.error(f"Error saving notifications: {str(e)}")
+
+def add_notification(notification_type, data):
+    """Add a new notification"""
+    notifications = load_notifications()
+    notification = {
+        'id': str(uuid.uuid4()),
+        'type': notification_type,
+        'data': data,
+        'timestamp': int(time.time() * 1000),
+        'acknowledged': False,
+        'ack_time': None
+    }
+    notifications.append(notification)
+    save_notifications(notifications)
+    return notification
+
+@app.route('/api/notifications/pending')
+def get_pending_notifications():
+    """Get all unacknowledged notifications"""
+    try:
+        notifications = load_notifications()
+        pending = [n for n in notifications if not n['acknowledged']]
+        return jsonify(pending)
+    except Exception as e:
+        logger.error(f"Error getting pending notifications: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/notifications/<notification_id>/acknowledge', methods=['POST'])
+def acknowledge_notification(notification_id):
+    """Mark a notification as acknowledged"""
+    try:
+        notifications = load_notifications()
+        for notification in notifications:
+            if notification['id'] == notification_id and not notification['acknowledged']:
+                notification['acknowledged'] = True
+                notification['ack_time'] = int(time.time() * 1000)
+                save_notifications(notifications)
+                return jsonify({'status': 'success'})
+        return jsonify({'error': 'Notification not found or already acknowledged'}), 404
+    except Exception as e:
+        logger.error(f"Error acknowledging notification: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/notifications/history')
+def get_notification_history():
+    """Get notification history with optional filters"""
+    try:
+        notifications = load_notifications()
+        
+        # Get query parameters
+        type_filter = request.args.get('type')
+        acknowledged = request.args.get('acknowledged')
+        
+        if type_filter:
+            notifications = [n for n in notifications if n['type'] == type_filter]
+        if acknowledged is not None:
+            is_ack = acknowledged.lower() == 'true'
+            notifications = [n for n in notifications if n['acknowledged'] == is_ack]
+            
+        return jsonify(notifications)
+    except Exception as e:
+        logger.error(f"Error getting notification history: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/notifications', methods=['POST'])
+def create_notification():
+    """Create a new notification"""
+    try:
+        data = request.json
+        if not data or 'type' not in data or 'data' not in data:
+            return jsonify({'error': 'Missing required fields'}), 400
+            
+        notification = add_notification(data['type'], data['data'])
+        return jsonify(notification)
+    except Exception as e:
+        logger.error(f"Error creating notification: {str(e)}")
+        return jsonify({'error': str(e)}), 500
 
 def load_incidents():
     """Load incidents from file with UUID if not present"""

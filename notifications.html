@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart CCTV Notifications</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .notification {
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 5px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .notification.fire {
+            background-color: #ffebee;
+            border-left: 5px solid #f44336;
+        }
+        .notification.fall {
+            background-color: #e3f2fd;
+            border-left: 5px solid #2196f3;
+        }
+        .high {
+            color: #d32f2f;
+            font-weight: bold;
+        }
+        .medium {
+            color: #f57c00;
+            font-weight: bold;
+        }
+        .notification-container {
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0,0,0,0.5);
+            z-index: 1000;
+        }
+        .modal-content {
+            position: relative;
+            background-color: #fefefe;
+            margin: 15% auto;
+            padding: 20px;
+            border-radius: 5px;
+            width: 80%;
+            max-width: 500px;
+            animation: slideIn 0.3s ease-out;
+        }
+        .close-btn {
+            position: absolute;
+            right: 10px;
+            top: 10px;
+            font-size: 24px;
+            cursor: pointer;
+        }
+        @keyframes slideIn {
+            from {transform: translateY(-100px); opacity: 0;}
+            to {transform: translateY(0); opacity: 1;}
+        }
+        .acknowledge-btn {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        .acknowledge-btn:hover {
+            background-color: #45a049;
+        }
+        .tabs {
+            margin-bottom: 20px;
+        }
+        .tab-btn {
+            padding: 10px 20px;
+            border: none;
+            background: none;
+            cursor: pointer;
+            font-size: 16px;
+            border-bottom: 2px solid transparent;
+        }
+        .tab-btn.active {
+            border-bottom: 2px solid #2196f3;
+            color: #2196f3;
+        }
+    </style>
+</head>
+<body>
+    <h1>Smart CCTV Notifications</h1>
+    
+    <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('pending')">Pending</button>
+        <button class="tab-btn" onclick="switchTab('history')">History</button>
+    </div>
+
+    <div id="notifications" class="notification-container"></div>
+
+    <!-- Alert Modal -->
+    <div id="alertModal" class="modal">
+        <div class="modal-content">
+            <span class="close-btn" onclick="closeModal()">&times;</span>
+            <h2 id="modalTitle">Alert!</h2>
+            <p id="modalMessage"></p>
+            <button class="acknowledge-btn" onclick="acknowledgeAlert()">Acknowledge</button>
+        </div>
+    </div>
+
+    <!-- Alert Sound -->
+    <audio id="alertSound" src="https://actions.google.com/sounds/v1/alarms/beep_short.ogg"></audio>
+
+    <script>
+        let currentTab = 'pending';
+        let currentAlert = null;
+        const alertSound = document.getElementById('alertSound');
+        const POLL_INTERVAL = 5000; // Poll every 5 seconds
+
+        function formatTime(timestamp) {
+            return new Date(timestamp).toLocaleTimeString();
+        }
+
+        function switchTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab-btn').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            refreshNotifications();
+        }
+
+        function showModal(notification) {
+            currentAlert = notification;
+            document.getElementById('modalTitle').textContent = notification.data.message;
+            document.getElementById('modalMessage').innerHTML = `
+                Confidence: ${(notification.data.confidence * 100).toFixed(1)}%<br>
+                Severity: <span class="${notification.data.severity}">${notification.data.severity}</span><br>
+                Time: ${formatTime(notification.timestamp)}
+            `;
+            document.getElementById('alertModal').style.display = 'block';
+            alertSound.play();
+        }
+
+        function closeModal() {
+            document.getElementById('alertModal').style.display = 'none';
+            currentAlert = null;
+        }
+
+        async function acknowledgeAlert() {
+            if (!currentAlert) return;
+            
+            try {
+                const response = await fetch(`http://localhost:5002/api/notifications/${currentAlert.id}/acknowledge`, {
+                    method: 'POST'
+                });
+                
+                if (response.ok) {
+                    closeModal();
+                    refreshNotifications();
+                } else {
+                    console.error('Failed to acknowledge notification');
+                }
+            } catch (error) {
+                console.error('Error acknowledging notification:', error);
+            }
+        }
+
+        function displayNotifications(notifications) {
+            const container = document.getElementById('notifications');
+            container.innerHTML = '';
+            
+            notifications.forEach(notification => {
+                const notificationDiv = document.createElement('div');
+                const type = notification.type.split('_')[0];
+                
+                notificationDiv.className = `notification ${type}`;
+                const data = notification.data;
+                
+                notificationDiv.innerHTML = `
+                    <div>
+                        <strong>${data.message}</strong><br>
+                        <small>
+                            Confidence: ${(data.confidence * 100).toFixed(1)}% | 
+                            Severity: <span class="${data.severity}">${data.severity}</span> | 
+                            Time: ${formatTime(notification.timestamp)}
+                            ${notification.acknowledged ? 
+                                `<br>Acknowledged at: ${formatTime(notification.ack_time)}` : 
+                                ''}
+                        </small>
+                    </div>
+                `;
+                
+                container.appendChild(notificationDiv);
+            });
+        }
+
+        async function checkNewNotifications() {
+            try {
+                const response = await fetch('http://localhost:5002/api/notifications/pending');
+                if (response.ok) {
+                    const notifications = await response.json();
+                    if (notifications.length > 0) {
+                        // Show the most recent unacknowledged notification
+                        showModal(notifications[0]);
+                    }
+                }
+            } catch (error) {
+                console.error('Error checking notifications:', error);
+            }
+        }
+
+        async function refreshNotifications() {
+            try {
+                const endpoint = currentTab === 'pending' 
+                    ? 'http://localhost:5002/api/notifications/pending'
+                    : 'http://localhost:5002/api/notifications/history';
+                    
+                const response = await fetch(endpoint);
+                if (response.ok) {
+                    const notifications = await response.json();
+                    displayNotifications(notifications);
+                }
+            } catch (error) {
+                console.error('Error fetching notifications:', error);
+            }
+        }
+
+        // Start polling
+        setInterval(checkNewNotifications, POLL_INTERVAL);
+        refreshNotifications();
+
+        // Initial check for notifications
+        checkNewNotifications();
+    </script>
+</body>
+</html> 

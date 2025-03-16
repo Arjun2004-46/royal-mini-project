@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import pygame  # For audio alerts
 import uuid
+import requests
 
 # Load configuration
 def load_config():
@@ -151,6 +152,9 @@ class AlertSystem:
         self.config = CONFIG.get('ALERTS', {}).get('SOUND', {})
         self.use_sound = self.config.get('ENABLED', True) and CONFIG.get('USE_SOUND', True)
         
+        # Initialize callback registry for external alert handlers
+        self.alert_callbacks = {}
+        
         if self.use_sound:
             pygame.init()
             pygame.mixer.init()
@@ -182,9 +186,26 @@ class AlertSystem:
                 self.sound_fall.play()
             time.sleep(self.config.get('MIN_DELAY', 2.0))
 
-    def trigger_alert(self, alert_type):
+    def register_alert_callback(self, alert_type, callback):
+        """Register a callback function for a specific alert type"""
+        if alert_type not in self.alert_callbacks:
+            self.alert_callbacks[alert_type] = []
+        self.alert_callbacks[alert_type].append(callback)
+        logging.info(f"Registered new alert callback for {alert_type}")
+        
+    def trigger_alert(self, alert_type, metadata=None):
+        """Trigger an alert with optional metadata"""
+        # Play sound alert
         if self.use_sound:
             self.alert_queue.put(alert_type)
+            
+        # Call registered callbacks
+        if alert_type in self.alert_callbacks:
+            for callback in self.alert_callbacks[alert_type]:
+                try:
+                    callback(alert_type, metadata)
+                except Exception as e:
+                    logging.error(f"Error in alert callback: {str(e)}")
 
 class IncidentRecorder:
     def __init__(self, output_dir):
@@ -740,6 +761,10 @@ class SmartCCTV:
         self.alert_system = AlertSystem()
         self.incident_recorder = IncidentRecorder("incidents")
         
+        # Register default alert handlers
+        self.alert_system.register_alert_callback("fire", self.handle_fire_alert)
+        self.alert_system.register_alert_callback("fall", self.handle_fall_alert)
+        
         # Performance optimization
         self.frame_processor = FrameProcessor()
         
@@ -799,6 +824,9 @@ class SmartCCTV:
         self.frame_count = 0
         self.process_every_n_frames = detection_config.get('PROCESS_EVERY_N_FRAMES', 2)
         
+        # API configuration
+        self.api_port = 5002
+        
         logging.info("Enhanced Smart CCTV System Initialized")
 
     def setup_camera(self):
@@ -855,7 +883,15 @@ class SmartCCTV:
             self.fire_params['confidence'] = confidence
             if fire_detected:
                 self.frame_processor.draw_fire_alert(frame, confidence)
-                self.alert_system.trigger_alert("fire")
+                # Pass metadata to alert system
+                alert_metadata = {
+                    'confidence': confidence,
+                    'threshold': self.fire_params['confidence_threshold'],
+                    'timestamp': time.time(),
+                    'detection_history': self.fire_params['detection_history'][-3:],
+                    'severity': 'high' if confidence > 0.7 else 'medium'
+                }
+                self.alert_system.trigger_alert("fire", alert_metadata)
             
             return fire_detected, confidence
             
@@ -898,7 +934,14 @@ class SmartCCTV:
                 fall_detected = avg_confidence > 0.6
             
             if fall_detected:
-                self.alert_system.trigger_alert("fall")
+                # Pass metadata to alert system
+                alert_metadata = {
+                    'confidence': confidence,
+                    'timestamp': time.time(),
+                    'confidence_history': self.fall_params['confidence_history'][-3:],
+                    'severity': 'high' if confidence > 0.8 else 'medium'
+                }
+                self.alert_system.trigger_alert("fall", alert_metadata)
             
             return fall_detected, confidence
             
@@ -999,6 +1042,74 @@ class SmartCCTV:
         cv2.destroyAllWindows()
         pygame.quit()
         logging.info("System shutdown complete")
+
+    def handle_fire_alert(self, alert_type, metadata):
+        """Handle fire alerts and send to API server"""
+        if alert_type == "fire" and metadata:
+            try:
+                # Prepare notification data
+                notification_data = {
+                    'message': 'FIRE DETECTED!',
+                    'confidence': metadata.get('confidence', 0.0),
+                    'threshold': metadata.get('threshold', 0.4),
+                    'severity': metadata.get('severity', 'medium'),
+                    'timestamp': int(time.time() * 1000)
+                }
+                
+                logging.info(f"Fire alert triggered with confidence: {notification_data['confidence']}")
+                
+                # Send to API server
+                self.send_notification('fire_alert', notification_data)
+                
+            except Exception as e:
+                logging.error(f"Error handling fire alert: {str(e)}", exc_info=True)
+
+    def handle_fall_alert(self, alert_type, metadata):
+        """Handle fall alerts and send to API server"""
+        if alert_type == "fall" and metadata:
+            try:
+                # Prepare notification data
+                notification_data = {
+                    'message': 'FALL DETECTED!',
+                    'confidence': metadata.get('confidence', 0.0),
+                    'severity': metadata.get('severity', 'medium'),
+                    'timestamp': int(time.time() * 1000)
+                }
+                
+                logging.info(f"Fall alert triggered with confidence: {notification_data['confidence']}")
+                
+                # Send to API server
+                self.send_notification('fall_alert', notification_data)
+                
+            except Exception as e:
+                logging.error(f"Error handling fall alert: {str(e)}", exc_info=True)
+
+    def send_notification(self, notification_type, data):
+        """Send notification to API server with retry mechanism"""
+        try:
+            max_retries = 3
+            retry_delay = 1  # seconds
+            
+            for attempt in range(max_retries):
+                try:
+                    response = requests.post(
+                        f'http://localhost:{self.api_port}/api/notifications',
+                        json={'type': notification_type, 'data': data},
+                        timeout=5
+                    )
+                    response.raise_for_status()
+                    logging.info(f"Successfully sent {notification_type} notification to API server")
+                    return response.json()
+                except requests.exceptions.RequestException as e:
+                    if attempt < max_retries - 1:
+                        logging.warning(f"Failed to send notification (attempt {attempt + 1}): {str(e)}")
+                        time.sleep(retry_delay)
+                        retry_delay *= 2
+                    else:
+                        raise
+        except Exception as e:
+            logging.error(f"Failed to send notification after {max_retries} attempts: {str(e)}", exc_info=True)
+            return None
 
 def main():
     parser = argparse.ArgumentParser(description='Enhanced Smart CCTV System')

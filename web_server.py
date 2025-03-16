@@ -1,7 +1,7 @@
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'  # Suppress TensorFlow logging
 
-from flask import Flask, jsonify, send_from_directory, abort, request
+from flask import Flask, jsonify, send_from_directory, abort, request, Response
 from flask_socketio import SocketIO
 from flask_cors import CORS
 import cv2
@@ -16,6 +16,8 @@ from datetime import datetime
 import logging
 import uuid
 import sys
+import queue
+import requests
 
 # Load configuration
 def load_config():
@@ -70,9 +72,109 @@ FRAME_SKIP_THRESHOLD = 0.066  # ~15 FPS (1/15)
 
 # Server configuration
 PORT = 5001  # Changed from default 5000 to avoid conflicts
+API_PORT = 5002  # Port for the API server
 
 # Global flag for controlling streaming
 streaming_active = True
+
+# Add notification queue for SSE
+notification_queue = queue.Queue()
+
+def send_sse_notification(notification_type, data):
+    """Helper function to send SSE notifications"""
+    notification = {
+        'type': notification_type,
+        'data': data,
+        'timestamp': int(time.time() * 1000)
+    }
+    notification_queue.put(notification)
+
+# Function to handle fire alerts from SmartCCTV
+def handle_fire_alert(alert_type, metadata):
+    """Handle fire alerts from the SmartCCTV system and notify clients"""
+    logger.info(f"Fire alert callback triggered with type: {alert_type} and metadata: {metadata}")
+    
+    if alert_type == "fire" and metadata:
+        try:
+            # Prepare notification data
+            notification_data = {
+                'message': 'FIRE DETECTED!',
+                'confidence': metadata.get('confidence', 0.0),
+                'threshold': metadata.get('threshold', 0.4),
+                'severity': metadata.get('severity', 'medium'),
+                'timestamp': int(time.time() * 1000)
+            }
+            
+            logger.info(f"Preparing to send notification: {notification_data}")
+            
+            # Add notification to file
+            result = add_notification('fire_alert', notification_data)
+            if result:
+                logger.info(f"Fire alert notification successfully saved with ID: {result.get('id', 'unknown')}")
+            else:
+                logger.error("Failed to save fire alert notification - no result returned")
+            
+        except Exception as e:
+            logger.error(f"Error saving fire alert: {str(e)}", exc_info=True)
+
+# Function to handle fall alerts from SmartCCTV
+def handle_fall_alert(alert_type, metadata):
+    """Handle fall alerts from the SmartCCTV system and notify clients"""
+    if alert_type == "fall" and metadata:
+        try:
+            # Prepare notification data
+            notification_data = {
+                'message': 'FALL DETECTED!',
+                'confidence': metadata.get('confidence', 0.0),
+                'severity': metadata.get('severity', 'medium'),
+                'timestamp': int(time.time() * 1000)
+            }
+            
+            # Add notification to file
+            add_notification('fall_alert', notification_data)
+            logger.info(f"Fall alert notification saved: {metadata.get('confidence', 0.0):.2f} confidence")
+            
+        except Exception as e:
+            logger.error(f"Error saving fall alert: {str(e)}")
+
+def add_notification(notification_type, data):
+    """Add a notification to the notifications file"""
+    try:
+        # Add retry mechanism for API server connection
+        max_retries = 3
+        retry_delay = 1  # seconds
+        
+        logger.info(f"Attempting to send notification to API server at http://localhost:{API_PORT}/api/notifications")
+        logger.info(f"Notification data: type={notification_type}, data={data}")
+        
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"Attempt {attempt + 1} to send notification")
+                response = requests.post(
+                    f'http://localhost:{API_PORT}/api/notifications',
+                    json={'type': notification_type, 'data': data},
+                    timeout=5  # 5 seconds timeout
+                )
+                logger.info(f"API response status code: {response.status_code}")
+                response.raise_for_status()
+                response_data = response.json()
+                logger.info(f"Successfully added notification to API server: {response_data}")
+                return response_data
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    logger.warning(f"Attempt {attempt + 1} failed: {str(e)}")
+                    logger.warning(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    retry_delay *= 2  # Exponential backoff
+                else:
+                    raise Exception(f"Failed to connect to API server after {max_retries} attempts: {str(e)}")
+                    
+    except Exception as e:
+        logger.error(f"Error adding notification: {str(e)}", exc_info=True)
+        # Fallback: Send through SSE if API server is not available
+        logger.info("Falling back to SSE notification")
+        send_sse_notification(notification_type, data)
+        return None
 
 # Function to load incidents with UUID if not present
 def load_incidents():
@@ -129,27 +231,35 @@ def init_smart_cctv():
     """Initialize the SmartCCTV system"""
     global smart_cctv, video_stream
     try:
+        logger.info("Starting SmartCCTV initialization...")
         # Try different camera indices for macOS
         for camera_index in [0, 1]:
             try:
                 camera_src = str(camera_index)
+                logger.info(f"Attempting to initialize camera with index {camera_index}")
                 smart_cctv = SmartCCTV(camera_source=camera_src)
                 video_stream = smart_cctv.vs  # Get the VideoStream from SmartCCTV
                 
                 # Test if we can get a frame
                 test_frame = video_stream.read_latest()
                 if test_frame is not None:
+                    logger.info("Successfully got test frame from camera")
+                    # Register alert callbacks
+                    logger.info("Registering alert callbacks...")
+                    smart_cctv.alert_system.register_alert_callback("fire", handle_fire_alert)
+                    smart_cctv.alert_system.register_alert_callback("fall", handle_fall_alert)
                     logger.info(f"Successfully initialized SmartCCTV with camera index {camera_index}")
+                    logger.info("Alert callbacks registered for: fire, fall")
                     return True
             except Exception as e:
-                logger.warning(f"Failed to initialize SmartCCTV with camera index {camera_index}: {str(e)}")
+                logger.warning(f"Failed to initialize SmartCCTV with camera index {camera_index}: {str(e)}", exc_info=True)
                 if smart_cctv:
                     smart_cctv.cleanup()
                     
         logger.error("No working camera found")
         return False
     except Exception as e:
-        logger.error(f"SmartCCTV initialization failed: {str(e)}")
+        logger.error(f"SmartCCTV initialization failed: {str(e)}", exc_info=True)
         return False
 
 def stream_video():
@@ -180,9 +290,21 @@ def stream_video():
                 
                 # If an incident was detected, notify clients
                 if incident_detected:
+                    # Check if it's a fire incident by examining the confidence value
+                    is_fire = False
+                    fire_confidence = 0.0
+                    
+                    if hasattr(smart_cctv, 'fire_params') and smart_cctv.fire_params['confidence'] >= smart_cctv.fire_params['confidence_threshold']:
+                        is_fire = True
+                        fire_confidence = smart_cctv.fire_params['confidence']
+                    
+                    # Send detailed alert information
                     socketio.emit('incident_detected', {
                         'timestamp': int(current_time * 1000),
-                        'message': 'Incident detected!'
+                        'message': 'Fire detected!' if is_fire else 'Incident detected!',
+                        'type': 'fire' if is_fire else 'incident',
+                        'confidence': fire_confidence if is_fire else 0.0,
+                        'severity': 'high' if is_fire and fire_confidence > 0.7 else 'medium'
                     })
                 
                 # Encode and emit the processed frame
@@ -373,6 +495,39 @@ def start_streaming():
     streaming_thread.daemon = True
     streaming_thread.start()
     return streaming_thread
+
+@app.route('/api/notifications/stream')
+def notification_stream():
+    """SSE endpoint for real-time notifications"""
+    def generate():
+        while True:
+            try:
+                # Get notification from queue with timeout
+                notification = notification_queue.get(timeout=30)
+                # Format as SSE message
+                data = f"data: {json.dumps(notification)}\n\n"
+                yield data
+            except queue.Empty:
+                # Send keepalive comment to maintain connection
+                yield ": keepalive\n\n"
+            except Exception as e:
+                logger.error(f"Error in notification stream: {str(e)}")
+                break
+    
+    return Response(
+        generate(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache',
+            'Connection': 'keep-alive',
+            'X-Accel-Buffering': 'no'
+        }
+    )
+
+@app.route('/')
+def index():
+    """Serve the notifications page"""
+    return send_from_directory('.', 'notifications.html')
 
 if __name__ == '__main__':
     try:
