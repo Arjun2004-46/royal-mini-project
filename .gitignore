@@ -1,0 +1,9 @@
+incidents/
+*.mp4
+*.jpg
+*.png
+*.jpeg
+*.gif
+*.bmp
+
+*.log
