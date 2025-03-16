@@ -14,12 +14,26 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import pygame  # For audio alerts
 
+# Load configuration
+def load_config():
+    try:
+        with open('config.json', 'r') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        logging.error("config.json not found. Using default configuration.")
+        return None
+    except json.JSONDecodeError as e:
+        logging.error(f"Error parsing config.json: {str(e)}")
+        return None
+
+CONFIG = load_config()
+
 # Configure logging with more detailed format
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, CONFIG.get('LOGGING', {}).get('LEVEL', 'INFO')),
     format='%(asctime)s - %(levelname)s - [%(threadName)s] - %(message)s',
     handlers=[
-        logging.FileHandler('cctv.log'),
+        logging.FileHandler(CONFIG.get('LOGGING', {}).get('FILE', 'cctv.log')),
         logging.StreamHandler()
     ]
 )
@@ -27,14 +41,18 @@ logging.basicConfig(
 class VideoStream:
     def __init__(self, src=0):
         self.stream = cv2.VideoCapture(src)
+        self.src = src
+        
+        # Get camera settings from config
+        camera_config = CONFIG.get('CAMERA', {})
         
         # Enhanced camera properties
-        self.stream.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-        self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)  # Increased resolution
-        self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        self.stream.set(cv2.CAP_PROP_FPS, 30)
-        self.stream.set(cv2.CAP_PROP_AUTOFOCUS, 1)  # Enable autofocus
-        self.stream.set(cv2.CAP_PROP_AUTO_EXPOSURE, 1)  # Enable auto exposure
+        self.stream.set(cv2.CAP_PROP_BUFFERSIZE, camera_config.get('BUFFER_SIZE', 1))
+        self.stream.set(cv2.CAP_PROP_FRAME_WIDTH, camera_config.get('WIDTH', 1280))
+        self.stream.set(cv2.CAP_PROP_FRAME_HEIGHT, camera_config.get('HEIGHT', 720))
+        self.stream.set(cv2.CAP_PROP_FPS, camera_config.get('FPS', 30))
+        self.stream.set(cv2.CAP_PROP_AUTOFOCUS, int(camera_config.get('AUTO_FOCUS', True)))
+        self.stream.set(cv2.CAP_PROP_AUTO_EXPOSURE, int(camera_config.get('AUTO_EXPOSURE', True)))
         
         # Advanced threading
         self.q = queue.Queue(maxsize=4)
@@ -110,25 +128,43 @@ class VideoStream:
 
 class AlertSystem:
     def __init__(self):
-        pygame.init()
-        pygame.mixer.init()
-        self.sound_fire = pygame.mixer.Sound("assets/fire_alert.wav")
-        self.sound_fall = pygame.mixer.Sound("assets/fall_alert.wav")
-        self.alert_thread = Thread(target=self._alert_loop, daemon=True)
-        self.alert_queue = queue.Queue()
-        self.alert_thread.start()
+        self.config = CONFIG.get('ALERTS', {}).get('SOUND', {})
+        self.use_sound = self.config.get('ENABLED', True) and CONFIG.get('USE_SOUND', True)
+        
+        if self.use_sound:
+            pygame.init()
+            pygame.mixer.init()
+            self.sound_fire = pygame.mixer.Sound("assets/fire_alert.wav")
+            self.sound_fall = pygame.mixer.Sound("assets/fall_alert.wav")
+            
+            # Set volume from config
+            volume = self.config.get('VOLUME', 1.0)
+            self.sound_fire.set_volume(volume)
+            self.sound_fall.set_volume(volume)
+            
+            self.alert_thread = Thread(target=self._alert_loop, daemon=True)
+            self.alert_queue = queue.Queue()
+            self.alert_thread.start()
+            logging.info("Sound alerts enabled")
+        else:
+            logging.info("Sound alerts disabled")
 
     def _alert_loop(self):
         while True:
+            if not self.use_sound:
+                time.sleep(1)
+                continue
+                
             alert_type = self.alert_queue.get()
             if alert_type == "fire":
                 self.sound_fire.play()
             elif alert_type == "fall":
                 self.sound_fall.play()
-            time.sleep(2)  # Minimum delay between alerts
+            time.sleep(self.config.get('MIN_DELAY', 2.0))
 
     def trigger_alert(self, alert_type):
-        self.alert_queue.put(alert_type)
+        if self.use_sound:
+            self.alert_queue.put(alert_type)
 
 class IncidentRecorder:
     def __init__(self, output_dir):
@@ -640,6 +676,9 @@ class SmartCCTV:
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
         
+        # Load configuration
+        self.config = CONFIG or {}
+        
         # Initialize MediaPipe with more lenient settings for partial detection
         self.mp_pose = mp.solutions.pose
         self.pose = self.mp_pose.Pose(
@@ -673,40 +712,46 @@ class SmartCCTV:
         # Performance optimization
         self.frame_processor = FrameProcessor()
         
-        # Enhanced fall detection parameters with more sensitive thresholds
+        # Load fall detection parameters from config
+        fall_config = self.config.get('FALL_DETECTION', {})
         self.fall_params = {
-            'threshold': 0.05,           # Reduced threshold for more sensitive detection
-            'frames_threshold': 2,       # Reduced frame threshold for faster detection
+            'threshold': fall_config.get('THRESHOLD', 0.05),
+            'frames_threshold': fall_config.get('FRAMES_THRESHOLD', 2),
             'counter': 0,
             'prev_ratio': None,
-            'movement_threshold': 0.1,   # More sensitive movement detection
+            'movement_threshold': fall_config.get('MOVEMENT_THRESHOLD', 0.1),
             'confidence_history': [],
-            'history_size': 3,          # Reduced history size for faster detection
-            'min_confidence': 0.2,      # Lower minimum confidence threshold
-            'recovery_frames': 5,       # Reduced recovery frames
-            'vertical_threshold': 45,   # More sensitive angle threshold
-            'height_ratio_threshold': 0.3 # More lenient height ratio threshold
+            'history_size': fall_config.get('HISTORY_SIZE', 3),
+            'min_confidence': fall_config.get('MIN_CONFIDENCE', 0.2),
+            'recovery_frames': fall_config.get('RECOVERY_FRAMES', 5),
+            'vertical_threshold': fall_config.get('VERTICAL_THRESHOLD', 45),
+            'height_ratio_threshold': fall_config.get('HEIGHT_RATIO_THRESHOLD', 0.3)
         }
         
-        # Enhanced fire detection parameters with more sensitive thresholds
+        # Load fire detection parameters from config
+        fire_config = self.config.get('FIRE_DETECTION', {})
+        hue_ranges = fire_config.get('HUE_RANGES', [
+            {'LOW': [0, 120, 120], 'HIGH': [25, 255, 255]},
+            {'LOW': [160, 120, 120], 'HIGH': [179, 255, 255]}
+        ])
+        
         self.fire_params = {
-            # More lenient hue ranges for fire detection
-            'lower1': np.array([0, 120, 120]),     # Lower saturation and value minimums
-            'upper1': np.array([25, 255, 255]),    # Wider hue range
-            'lower2': np.array([160, 120, 120]),   # Lower saturation and value minimums
-            'upper2': np.array([179, 255, 255]),   # Wider hue range
-            'min_area': 100,       # Reduced minimum area
-            'max_area': 100000,    # Increased maximum area
+            'lower1': np.array(hue_ranges[0]['LOW']),
+            'upper1': np.array(hue_ranges[0]['HIGH']),
+            'lower2': np.array(hue_ranges[1]['LOW']),
+            'upper2': np.array(hue_ranges[1]['HIGH']),
+            'min_area': fire_config.get('MIN_AREA', 100),
+            'max_area': fire_config.get('MAX_AREA', 100000),
             'confidence': 0.0,
-            'confidence_threshold': 0.4,  # Lower confidence threshold
+            'confidence_threshold': fire_config.get('CONFIDENCE_THRESHOLD', 0.4),
             'detection_history': [],
-            'history_size': 5,     # Shorter history for faster detection
-            'min_saturation': 120, # Lower minimum saturation
-            'min_intensity_ratio': 1.2,  # Lower intensity ratio requirement
-            'flicker_threshold': 0.1,    # Lower flicker threshold
+            'history_size': fire_config.get('HISTORY_SIZE', 5),
+            'min_saturation': fire_config.get('MIN_SATURATION', 120),
+            'min_intensity_ratio': fire_config.get('MIN_INTENSITY_RATIO', 1.2),
+            'flicker_threshold': fire_config.get('FLICKER_THRESHOLD', 0.1),
             'prev_intensities': [],
-            'intensity_history_size': 5,  # Shorter intensity history
-            'movement_threshold': 20.0,   # More sensitive movement threshold
+            'intensity_history_size': fire_config.get('HISTORY_SIZE', 5),
+            'movement_threshold': fire_config.get('MOVEMENT_THRESHOLD', 20.0),
             'prev_frame': None,
             'last_movement_time': 0
         }
@@ -714,13 +759,14 @@ class SmartCCTV:
         # Pass fire parameters to frame processor
         self.frame_processor.set_fire_params(self.fire_params)
         
-        # Thread pool and other parameters
-        self.thread_pool = ThreadPoolExecutor(max_workers=4)
+        # Thread pool and other parameters from config
+        detection_config = self.config.get('DETECTION', {})
+        self.thread_pool = ThreadPoolExecutor(max_workers=detection_config.get('MAX_WORKERS', 4))
         self.detection_results = {}
         self.last_incident_time = {'fall': 0, 'fire': 0}
-        self.min_incident_interval = 3
+        self.min_incident_interval = detection_config.get('MIN_INCIDENT_INTERVAL', 3)
         self.frame_count = 0
-        self.process_every_n_frames = 2
+        self.process_every_n_frames = detection_config.get('PROCESS_EVERY_N_FRAMES', 2)
         
         logging.info("Enhanced Smart CCTV System Initialized")
 

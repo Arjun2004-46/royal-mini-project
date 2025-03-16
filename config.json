@@ -1,0 +1,62 @@
+{
+    "USE_SOUND": false,
+    "CAMERA": {
+        "WIDTH": 1280,
+        "HEIGHT": 720,
+        "FPS": 30,
+        "BUFFER_SIZE": 1,
+        "AUTO_FOCUS": true,
+        "AUTO_EXPOSURE": true
+    },
+    "DETECTION": {
+        "PROCESS_EVERY_N_FRAMES": 2,
+        "MIN_INCIDENT_INTERVAL": 3,
+        "MAX_WORKERS": 4
+    },
+    "FALL_DETECTION": {
+        "THRESHOLD": 0.05,
+        "FRAMES_THRESHOLD": 2,
+        "MOVEMENT_THRESHOLD": 0.1,
+        "MIN_CONFIDENCE": 0.2,
+        "RECOVERY_FRAMES": 5,
+        "VERTICAL_THRESHOLD": 45,
+        "HEIGHT_RATIO_THRESHOLD": 0.3,
+        "HISTORY_SIZE": 3
+    },
+    "FIRE_DETECTION": {
+        "HUE_RANGES": [
+            {
+                "LOW": [0, 120, 120],
+                "HIGH": [25, 255, 255]
+            },
+            {
+                "LOW": [160, 120, 120],
+                "HIGH": [179, 255, 255]
+            }
+        ],
+        "MIN_AREA": 100,
+        "MAX_AREA": 100000,
+        "CONFIDENCE_THRESHOLD": 0.4,
+        "MIN_SATURATION": 120,
+        "MIN_INTENSITY_RATIO": 1.2,
+        "FLICKER_THRESHOLD": 0.1,
+        "HISTORY_SIZE": 5,
+        "MOVEMENT_THRESHOLD": 20.0
+    },
+    "ALERTS": {
+        "SOUND": {
+            "ENABLED": true,
+            "VOLUME": 1.0,
+            "MIN_DELAY": 2.0
+        },
+        "VISUAL": {
+            "FONT_SCALE": 0.7,
+            "THICKNESS": 2,
+            "OVERLAY_OPACITY": 0.3
+        }
+    },
+    "LOGGING": {
+        "LEVEL": "INFO",
+        "FILE": "cctv.log"
+    }
+} 
