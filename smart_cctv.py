@@ -563,7 +563,7 @@ class FrameProcessor:
         
         # Show confidence breakdown
         cv2.putText(frame, f'Fall Detection Confidence: {confidence:.2f}', 
-                   (10, y_offset), self.font, 0.6, (0, 0, 255), 2, self.line_type)
+                   (10, y_offset), self.font, 0.6, (255, 0, 0), 2, self.line_type)
         y_offset -= 25
         
         if 'body_angle' in metrics:
@@ -607,7 +607,7 @@ class FrameProcessor:
     def draw_fall_alert(self, frame, angle, confidence):
         """Enhanced fall alert visualization"""
         # Draw attention-grabbing alert box
-        cv2.rectangle(frame, (0, 0), (frame.shape[1], frame.shape[0]), (0, 0, 255), 4)
+        cv2.rectangle(frame, (0, 0), (frame.shape[1], frame.shape[0]), (255, 0, 0), 4)
         
         # Create semi-transparent overlay for alert
         overlay = frame.copy()
@@ -616,14 +616,14 @@ class FrameProcessor:
         
         # Draw alert text with multiple information levels
         cv2.putText(frame, f'FALL DETECTED!', 
-                   (50, 35), self.font, 1.2, (0, 0, 255), 3, self.line_type)
+                   (50, 35), self.font, 1.2, (255, 0, 0), 3, self.line_type)
         cv2.putText(frame, f'Angle: {angle:.1f}° | Confidence: {confidence:.2f}',
                    (50, 55), self.font, 0.7, (255, 255, 255), 2, self.line_type)
         
         # Add pulsing effect
         pulse = int(time.time() * 4) % 2
         if pulse:
-            cv2.rectangle(frame, (0, 0), (frame.shape[1], frame.shape[0]), (0, 0, 255), 6)
+            cv2.rectangle(frame, (0, 0), (frame.shape[1], frame.shape[0]), (255, 0, 0), 6)
 
     def draw_fire_alert(self, frame, confidence):
         """Enhanced fire alert visualization with debug info"""

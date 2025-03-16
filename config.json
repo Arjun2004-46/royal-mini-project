@@ -9,7 +9,7 @@
         "AUTO_EXPOSURE": true
     },
     "DETECTION": {
-        "PROCESS_EVERY_N_FRAMES": 2,
+        "PROCESS_EVERY_N_FRAMES": 1,
         "MIN_INCIDENT_INTERVAL": 3,
         "MAX_WORKERS": 4
     },
