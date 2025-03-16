@@ -2,6 +2,8 @@
 
 This project implements an AI-powered CCTV system that can detect falls and fire incidents in real-time using computer vision and machine learning techniques.
 
+For detailed technical documentation and architecture overview, please see [documentation.md](documentation.md).
+
 ## Features
 
 - Real-time fall detection using advanced pose estimation and biomechanical analysis
